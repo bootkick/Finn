@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finn"
+version = "0.1.0"
+description = "Self-evolving financial AI agent that rewrites its own strategy code"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.39.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "typer>=0.9.0",
+    "rich>=13.7.0",
+    "schedule>=1.2.1",
+]
+
+[project.optional-dependencies]
+collectors = [
+    "yfinance>=0.2.36",
+    "praw>=7.7.1",
+    "feedparser>=6.0.11",
+    "sec-edgar-downloader>=5.0.0",
+]
+dev = [
+    "pytest>=7.4.0",
+]
+
+[project.scripts]
+finn = "finn.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
