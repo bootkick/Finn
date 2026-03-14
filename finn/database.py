@@ -82,6 +82,35 @@ class Database:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                memory_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pick_id INTEGER,
+                ticker TEXT NOT NULL,
+                side TEXT NOT NULL,
+                notional REAL,
+                conviction TEXT,
+                order_id TEXT,
+                status TEXT,
+                mode TEXT DEFAULT 'PAPER',
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (pick_id) REFERENCES picks(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS linkedin_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker);
             CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp);
             CREATE INDEX IF NOT EXISTS idx_picks_timestamp ON picks(timestamp);
@@ -252,6 +281,64 @@ class Database:
             "SELECT content FROM journal_entries WHERE date = ?", (date_str,)
         ).fetchone()
         return row["content"] if row else None
+
+    def save_memory(self, date_str: str, memory_type: str, content: str) -> None:
+        self.conn.execute(
+            """INSERT INTO memory (date, memory_type, content, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (date_str, memory_type, content, datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def get_recent_memories(self, memory_type: str = "reflection", limit: int = 7) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT * FROM memory WHERE memory_type = ?
+               ORDER BY date DESC LIMIT ?""",
+            (memory_type, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_trade(self, trade: dict) -> None:
+        self.conn.execute(
+            """INSERT INTO trades (ticker, side, notional, conviction, order_id,
+               status, mode, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                trade["ticker"],
+                trade["side"],
+                trade.get("notional"),
+                trade.get("conviction"),
+                trade.get("order_id"),
+                trade.get("status"),
+                trade.get("mode", "PAPER"),
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_recent_trades(self, days: int = 30) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT * FROM trades
+               WHERE timestamp >= datetime('now', ?)
+               ORDER BY timestamp DESC""",
+            (f"-{days} days",),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_linkedin_post(self, date_str: str, content: str) -> None:
+        self.conn.execute(
+            """INSERT INTO linkedin_posts (date, content, created_at)
+               VALUES (?, ?, ?)""",
+            (date_str, content, datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def get_recent_linkedin_posts(self, limit: int = 5) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM linkedin_posts ORDER BY date DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self):
         self.conn.close()

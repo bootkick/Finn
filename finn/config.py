@@ -22,16 +22,36 @@ class Settings(BaseSettings):
     news_api_key: str = Field(default="", alias="NEWS_API_KEY")
     alpha_vantage_api_key: str = Field(default="", alias="ALPHA_VANTAGE_API_KEY")
 
+    # Trading API (Alpaca)
+    alpaca_api_key: str = Field(default="", alias="ALPACA_API_KEY")
+    alpaca_api_secret: str = Field(default="", alias="ALPACA_API_SECRET")
+    alpaca_paper: bool = Field(default=True, alias="ALPACA_PAPER")
+
     # Agent settings
     watchlist: str = "AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,JPM,V,JNJ,WMT,PG,UNH,HD,MA"
+    crypto_watchlist: str = "BTC,ETH,SOL,ADA,XRP,AVAX,LINK,DOGE"
     data_dir: str = "./data"
     log_level: str = "INFO"
     evolution_min_days: int = 7
     max_picks_per_day: int = 5
+    enable_trading: bool = False
+    enable_crypto: bool = True
 
     @property
     def watchlist_tickers(self) -> list[str]:
         return [t.strip() for t in self.watchlist.split(",") if t.strip()]
+
+    @property
+    def crypto_tickers(self) -> list[str]:
+        return [t.strip() for t in self.crypto_watchlist.split(",") if t.strip()]
+
+    @property
+    def all_tickers(self) -> list[str]:
+        """Combined stock + crypto watchlist."""
+        tickers = self.watchlist_tickers
+        if self.enable_crypto:
+            tickers = tickers + self.crypto_tickers
+        return tickers
 
     @property
     def data_path(self) -> Path:
@@ -64,6 +84,16 @@ class Settings(BaseSettings):
     @property
     def has_reddit_keys(self) -> bool:
         return bool(self.reddit_client_id and self.reddit_client_secret)
+
+    @property
+    def has_alpaca_keys(self) -> bool:
+        return bool(self.alpaca_api_key and self.alpaca_api_secret)
+
+    @property
+    def memory_path(self) -> Path:
+        p = self.data_path / "memory"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
 
 
 def get_settings() -> Settings:

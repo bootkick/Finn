@@ -1,4 +1,4 @@
-"""Journal writer — daily markdown changelog for Build in Public."""
+"""Journal writer — daily markdown changelog + memory system for Finn."""
 
 from __future__ import annotations
 
@@ -12,7 +12,12 @@ logger = logging.getLogger(__name__)
 
 
 class JournalWriter:
-    """Writes daily journal entries documenting Finn's evolution."""
+    """Writes daily journal entries and maintains Finn's memory.
+
+    The journal serves dual purpose:
+    1. Build in Public content (daily markdown files)
+    2. Memory system for the evolution engine (DB-backed reflections)
+    """
 
     def __init__(self, db: Database, journal_path: Path):
         self.db = db
@@ -26,12 +31,16 @@ class JournalWriter:
         performance_update: list[dict],
         evolution_result: dict | None,
         strategy_description: str,
+        trades_executed: list[dict] | None = None,
+        human_questions: list[dict] | None = None,
+        source_suggestions: list[dict] | None = None,
     ) -> str:
         """Write today's journal entry and return the content."""
         lines = [
             f"# Finn Daily Journal — {date}",
             "",
             f"*Generated at {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}*",
+            f"*Day {self._get_day_number()} of the journey*",
             "",
             "---",
             "",
@@ -44,9 +53,9 @@ class JournalWriter:
         lines.append("## Today's Picks")
         if picks_made:
             for pick in picks_made:
-                emoji_dir = "LONG" if pick.get("direction", "long") == "long" else "SHORT"
+                direction = "LONG" if pick.get("direction", "long") == "long" else "SHORT"
                 lines.append(
-                    f"- **{pick['ticker']}** ({emoji_dir}, {pick.get('conviction', 'medium')}): "
+                    f"- **{pick['ticker']}** ({direction}, {pick.get('conviction', 'medium')}): "
                     f"{pick.get('reasoning', 'N/A')[:150]}"
                 )
         else:
@@ -67,6 +76,18 @@ class JournalWriter:
             lines.append("*No open positions to report.*")
         lines.append("")
 
+        # Trades
+        if trades_executed:
+            lines.append("## Trades Executed")
+            for trade in trades_executed:
+                mode = trade.get("mode", "PAPER")
+                lines.append(
+                    f"- [{mode}] {trade.get('side', '?').upper()} "
+                    f"${trade.get('notional', 0):.2f} of **{trade['ticker']}** "
+                    f"({trade.get('conviction', '?')} conviction) — {trade.get('status', '?')}"
+                )
+            lines.append("")
+
         # Evolution
         lines.append("## Strategy Evolution")
         if evolution_result and evolution_result.get("evolved"):
@@ -82,6 +103,23 @@ class JournalWriter:
         else:
             lines.append("*No evolution cycle today (not enough data yet).*")
         lines.append("")
+
+        # Source suggestions
+        if source_suggestions:
+            lines.append("## New Source Ideas")
+            for s in source_suggestions:
+                lines.append(f"- **{s.get('source', '?')}**: {s.get('reason', 'N/A')} (difficulty: {s.get('difficulty', '?')})")
+            lines.append("")
+
+        # Human-in-the-loop
+        if human_questions:
+            lines.append("## Questions for Human Operator")
+            for q in human_questions:
+                status = "ANSWERED" if q.get("answered") else "PENDING"
+                lines.append(f"- [{status}] {q.get('question', '?')}")
+                if q.get("answer"):
+                    lines.append(f"  > {q['answer']}")
+            lines.append("")
 
         # Current strategy
         lines.append("## Current Strategy")
@@ -102,6 +140,30 @@ class JournalWriter:
 
         logger.info(f"Journal entry written: {filepath}")
         return content
+
+    def save_memory(self, date: str, memory_type: str, content: str) -> None:
+        """Save a memory entry (reflection, lesson, insight)."""
+        self.db.save_memory(date, memory_type, content)
+
+        # Also save to file for easy browsing
+        memory_dir = self.journal_path.parent / "memory"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        filepath = memory_dir / f"{date}_{memory_type}.md"
+        filepath.write_text(f"# Finn Memory — {memory_type} — {date}\n\n{content}")
+
+    def get_memory_context(self, limit: int = 7) -> str:
+        """Get recent memories as context string for evolution/personality."""
+        memories = self.db.get_recent_memories("reflection", limit)
+        if not memories:
+            return ""
+
+        lines = []
+        for m in memories:
+            lines.append(f"### {m['date']}")
+            lines.append(m["content"])
+            lines.append("")
+
+        return "\n".join(lines)
 
     def _get_day_number(self) -> int:
         """How many days has Finn been running?"""
