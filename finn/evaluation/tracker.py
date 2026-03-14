@@ -11,6 +11,26 @@ from finn.models.picks import Pick
 logger = logging.getLogger(__name__)
 
 
+def _get_current_price(ticker_symbol: str) -> float | None:
+    """Get current price via Yahoo Finance HTTP API."""
+    from finn.collectors.market_data import _yahoo_request, YAHOO_CHART_URL
+    from finn.collectors.crypto import CRYPTO_COINS
+
+    symbol = CRYPTO_COINS.get(ticker_symbol, ticker_symbol)
+    try:
+        url = YAHOO_CHART_URL.format(symbol=symbol)
+        data = _yahoo_request(url)
+        result = data.get("chart", {}).get("result", [])
+        if result:
+            closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+            valid = [c for c in closes if c is not None]
+            if valid:
+                return float(valid[-1])
+    except Exception:
+        pass
+    return None
+
+
 class PerformanceTracker:
     """Tracks pick performance over time using market data."""
 
@@ -26,23 +46,15 @@ class PerformanceTracker:
 
     def update_open_positions(self) -> list[dict]:
         """Update all open positions with current prices."""
-        try:
-            import yfinance as yf
-        except ImportError:
-            logger.warning("yfinance not installed, can't update positions")
-            return []
-
         positions = self.db.get_open_positions()
         updated = []
 
         for pos in positions:
             try:
-                ticker = yf.Ticker(pos["ticker"])
-                hist = ticker.history(period="1d")
-                if hist.empty:
+                current_price = _get_current_price(pos["ticker"])
+                if current_price is None:
                     continue
 
-                current_price = float(hist["Close"].iloc[-1])
                 entry_price = pos["entry_price"]
                 entry_date = datetime.fromisoformat(pos["entry_date"])
                 days_held = (datetime.utcnow() - entry_date).days

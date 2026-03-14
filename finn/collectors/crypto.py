@@ -1,4 +1,4 @@
-"""Crypto market data collector using yfinance and CoinGecko."""
+"""Crypto market data collector using Yahoo Finance HTTP API and CoinGecko."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import urllib.request
 from datetime import datetime
 
 from finn.collectors.base import BaseCollector
+from finn.collectors.market_data import _yahoo_request, YAHOO_CHART_URL
 from finn.models.signals import Signal, SignalType
 
 logger = logging.getLogger(__name__)
@@ -51,50 +52,57 @@ class CryptoCollector(BaseCollector):
     def collect(self, tickers: list[str]) -> list[Signal]:
         signals = []
 
-        # Collect via yfinance (price/volume/technicals)
-        signals.extend(self._collect_yfinance(tickers))
+        # Collect via Yahoo Finance HTTP API (price/volume/technicals)
+        signals.extend(self._collect_yahoo(tickers))
 
         # Collect via CoinGecko (trending, market cap, community)
         signals.extend(self._collect_coingecko(tickers))
 
         return signals
 
-    def _collect_yfinance(self, tickers: list[str]) -> list[Signal]:
-        try:
-            import yfinance as yf
-        except ImportError:
-            logger.warning("yfinance not installed, skipping crypto price data")
-            return []
-
+    def _collect_yahoo(self, tickers: list[str]) -> list[Signal]:
+        """Collect crypto price data from Yahoo Finance HTTP API."""
         signals = []
-        # Filter to only crypto tickers in our list
         crypto_tickers = [t for t in tickers if t in CRYPTO_COINS]
 
         for coin in crypto_tickers:
             try:
-                yf_ticker = CRYPTO_COINS[coin]
-                ticker = yf.Ticker(yf_ticker)
-                hist = ticker.history(period="1mo")
+                yf_symbol = CRYPTO_COINS[coin]
+                url = YAHOO_CHART_URL.format(symbol=yf_symbol)
+                data = _yahoo_request(url)
 
-                if hist.empty:
+                result = data.get("chart", {}).get("result", [])
+                if not result:
                     continue
 
-                latest = hist.iloc[-1]
-                prev = hist.iloc[-2] if len(hist) > 1 else latest
+                chart = result[0]
+                quotes = chart.get("indicators", {}).get("quote", [{}])[0]
+                timestamps = chart.get("timestamp", [])
+                closes = quotes.get("close", [])
+                volumes = quotes.get("volume", [])
+
+                valid_closes = [(t, c) for t, c in zip(timestamps, closes) if c is not None]
+                valid_volumes = [v for v in volumes if v is not None]
+
+                if len(valid_closes) < 2:
+                    continue
+
+                latest_price = valid_closes[-1][1]
+                prev_price = valid_closes[-2][1]
 
                 # 24h price change
-                price_change = (latest["Close"] - prev["Close"]) / prev["Close"]
+                price_change = (latest_price - prev_price) / prev_price
                 signals.append(
                     Signal(
-                        source="crypto_yfinance",
+                        source="crypto_yahoo",
                         signal_type=SignalType.PRICE,
                         ticker=coin,
                         headline=f"{coin} {'up' if price_change > 0 else 'down'} {abs(price_change)*100:.1f}%",
                         sentiment=max(-1.0, min(1.0, price_change * 5)),
                         magnitude=min(1.0, abs(price_change) * 3),
                         metadata={
-                            "close": float(latest["Close"]),
-                            "prev_close": float(prev["Close"]),
+                            "close": float(latest_price),
+                            "prev_close": float(prev_price),
                             "change_pct": float(price_change),
                             "asset_type": "crypto",
                         },
@@ -102,29 +110,31 @@ class CryptoCollector(BaseCollector):
                 )
 
                 # Volume spike
-                avg_volume = hist["Volume"].mean()
-                if avg_volume > 0:
-                    vol_ratio = latest["Volume"] / avg_volume
-                    if vol_ratio > 2.0 or vol_ratio < 0.3:
-                        signals.append(
-                            Signal(
-                                source="crypto_yfinance",
-                                signal_type=SignalType.VOLUME,
-                                ticker=coin,
-                                headline=f"{coin} volume {vol_ratio:.1f}x average — {'whale activity?' if vol_ratio > 3 else 'unusual'}",
-                                sentiment=0.2 if vol_ratio > 2.0 else -0.2,
-                                magnitude=min(1.0, abs(vol_ratio - 1.0) / 3),
-                                metadata={"volume_ratio": float(vol_ratio), "asset_type": "crypto"},
+                if valid_volumes:
+                    avg_volume = sum(valid_volumes) / len(valid_volumes)
+                    if avg_volume > 0:
+                        vol_ratio = valid_volumes[-1] / avg_volume
+                        if vol_ratio > 2.0 or vol_ratio < 0.3:
+                            signals.append(
+                                Signal(
+                                    source="crypto_yahoo",
+                                    signal_type=SignalType.VOLUME,
+                                    ticker=coin,
+                                    headline=f"{coin} volume {vol_ratio:.1f}x average — {'whale activity?' if vol_ratio > 3 else 'unusual'}",
+                                    sentiment=0.2 if vol_ratio > 2.0 else -0.2,
+                                    magnitude=min(1.0, abs(vol_ratio - 1.0) / 3),
+                                    metadata={"volume_ratio": float(vol_ratio), "asset_type": "crypto"},
+                                )
                             )
-                        )
 
                 # 7-day momentum
-                if len(hist) >= 7:
-                    week_ago = hist["Close"].iloc[-7]
-                    week_change = (latest["Close"] - week_ago) / week_ago
+                close_values = [c for _, c in valid_closes]
+                if len(close_values) >= 7:
+                    week_ago = close_values[-7]
+                    week_change = (latest_price - week_ago) / week_ago
                     signals.append(
                         Signal(
-                            source="crypto_yfinance",
+                            source="crypto_yahoo",
                             signal_type=SignalType.TECHNICAL,
                             ticker=coin,
                             headline=f"{coin} 7d momentum: {week_change*100:+.1f}%",
@@ -143,7 +153,6 @@ class CryptoCollector(BaseCollector):
         """Collect trending/community signals from CoinGecko free API."""
         signals = []
 
-        # Check trending coins
         try:
             req = urllib.request.Request(
                 "https://api.coingecko.com/api/v3/search/trending",
@@ -152,13 +161,10 @@ class CryptoCollector(BaseCollector):
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
 
-            trending_ids = set()
             for item in data.get("coins", []):
                 coin_data = item.get("item", {})
                 coin_id = coin_data.get("id", "")
-                trending_ids.add(coin_id)
 
-                # Find matching ticker
                 for symbol, cg_id in COINGECKO_IDS.items():
                     if cg_id == coin_id and symbol in tickers:
                         rank = coin_data.get("market_cap_rank", 0)

@@ -23,5 +23,5 @@ def test_collector_name():
 def test_collector_handles_empty_tickers():
     collector = CryptoCollector()
     # Should not crash with tickers not in our mapping
-    signals = collector._collect_yfinance(["NONEXISTENT"])
+    signals = collector._collect_yahoo(["NONEXISTENT"])
     assert signals == []

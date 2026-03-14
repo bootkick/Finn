@@ -364,22 +364,21 @@ def _count_sources(signals: list[Signal]) -> int:
 
 
 def _set_entry_prices(picks: list, tickers: list[str]) -> list:
-    """Set entry prices on picks using current market data."""
-    try:
-        import yfinance as yf
-    except ImportError:
-        return picks
-
+    """Set entry prices on picks using Yahoo Finance HTTP API."""
+    from finn.collectors.market_data import _yahoo_request, YAHOO_CHART_URL
     from finn.collectors.crypto import CRYPTO_COINS
 
     for pick in picks:
         try:
-            # Map crypto tickers to yfinance format
-            yf_symbol = CRYPTO_COINS.get(pick.ticker, pick.ticker)
-            ticker = yf.Ticker(yf_symbol)
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                pick.entry_price = float(hist["Close"].iloc[-1])
+            symbol = CRYPTO_COINS.get(pick.ticker, pick.ticker)
+            url = YAHOO_CHART_URL.format(symbol=symbol)
+            data = _yahoo_request(url)
+            result = data.get("chart", {}).get("result", [])
+            if result:
+                closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                valid = [c for c in closes if c is not None]
+                if valid:
+                    pick.entry_price = float(valid[-1])
         except Exception:
             pass
     return picks
