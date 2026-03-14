@@ -1,75 +1,109 @@
-"""SEC EDGAR filing collector."""
+"""SEC EDGAR filing collector using EFTS full-text search API."""
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime
+import urllib.request
+from datetime import datetime, timedelta
 
 from finn.collectors.base import BaseCollector
 from finn.models.signals import Signal, SignalType
 
 logger = logging.getLogger(__name__)
 
-# Filing types that often move markets
-IMPORTANT_FILING_TYPES = ["8-K", "10-Q", "10-K", "4"]
+# SEC EDGAR full-text search API (free, no key needed)
+EDGAR_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index?q=%22{ticker}%22&dateRange=custom&startdt={start}&enddt={end}&forms=8-K,10-Q,10-K,4"
+EDGAR_FILING_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company={ticker}&type=8-K&dateb=&owner=include&count=5&search_text=&action=getcompany&output=atom"
 
 
 class SECFilingCollector(BaseCollector):
-    """Collects signals from recent SEC EDGAR filings."""
+    """Collects signals from recent SEC EDGAR filings via EFTS search API."""
 
     @property
     def name(self) -> str:
         return "sec_edgar"
 
     def collect(self, tickers: list[str]) -> list[Signal]:
-        try:
-            from sec_edgar_downloader import Downloader
-        except ImportError:
-            logger.warning("sec-edgar-downloader not installed, skipping SEC filings")
-            return []
-
         signals = []
         for ticker in tickers:
             try:
                 signals.extend(self._collect_ticker(ticker))
             except Exception as e:
-                logger.debug(f"Failed to check SEC filings for {ticker}: {e}")
+                logger.debug(f"SEC EDGAR failed for {ticker}: {e}")
         return signals
 
     def _collect_ticker(self, ticker: str) -> list[Signal]:
-        """Check for recent filings. Generates a signal if a new filing exists."""
-        import urllib.request
-        import json
-
+        """Query EDGAR EFTS for recent filings mentioning this ticker."""
         signals = []
-        # Use SEC EDGAR's free JSON API (no key needed)
-        url = f"https://efts.sec.gov/LATEST/search-index?q=%22{ticker}%22&dateRange=custom&startdt=2026-03-01&enddt=2026-03-06&forms=8-K,10-Q,10-K"
-        headers = {"User-Agent": "Finn Financial Agent research@example.com"}
+
+        end_date = datetime.utcnow().date()
+        start_date = end_date - timedelta(days=7)
+
+        url = EDGAR_SEARCH_URL.format(
+            ticker=ticker,
+            start=start_date.isoformat(),
+            end=end_date.isoformat(),
+        )
+
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Finn Financial Agent finn@example.com",
+                "Accept": "application/json",
+            },
+        )
 
         try:
-            req = urllib.request.Request(
-                f"https://efts.sec.gov/LATEST/search-index?q=%22{ticker}%22&forms=8-K&dateRange=custom&category=form-type",
-                headers=headers,
-            )
-            # Use the simpler EDGAR full-text search API
-            search_url = f"https://efts.sec.gov/LATEST/search-index?q=%22{ticker}%22&forms=8-K,10-Q,10-K"
-            req = urllib.request.Request(search_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception as e:
+            logger.debug(f"EDGAR API request failed for {ticker}: {e}")
+            return signals
 
-            # Fallback: just signal that we checked
-            # The strategy can evolve more sophisticated filing analysis
+        hits = data.get("hits", {}).get("hits", [])
+        if not hits:
+            return signals
+
+        for hit in hits[:3]:  # Max 3 filings per ticker
+            source = hit.get("_source", {})
+            form_type = source.get("form_type", "")
+            filed_date = source.get("file_date", "")
+            entity = source.get("entity_name", ticker)
+            description = source.get("file_description", "")
+
+            # Filing type determines sentiment signal
+            # 8-K = material events (could be good or bad, signal is magnitude)
+            # 10-Q/10-K = quarterly/annual (routine but notable)
+            # 4 = insider trading (directional signal)
+            if form_type == "4":
+                headline = f"{ticker} insider transaction filed ({filed_date})"
+                sentiment = 0.1  # Slight positive bias — insiders buying
+                magnitude = 0.4
+            elif form_type == "8-K":
+                headline = f"{ticker} filed 8-K: {description[:80] or 'material event'} ({filed_date})"
+                sentiment = 0.0  # Neutral — could go either way
+                magnitude = 0.6  # But high magnitude — material events matter
+            else:
+                headline = f"{ticker} filed {form_type} ({filed_date})"
+                sentiment = 0.0
+                magnitude = 0.3
+
             signals.append(
                 Signal(
                     source="sec_edgar",
                     signal_type=SignalType.FILING,
                     ticker=ticker,
-                    headline=f"SEC filing check for {ticker}",
-                    content="Filing monitoring active",
-                    sentiment=0.0,
-                    magnitude=0.1,
-                    metadata={"checked": True},
+                    headline=headline,
+                    content=f"Entity: {entity}. Form: {form_type}. Filed: {filed_date}. {description[:200]}",
+                    sentiment=sentiment,
+                    magnitude=magnitude,
+                    metadata={
+                        "form_type": form_type,
+                        "file_date": filed_date,
+                        "entity_name": entity,
+                    },
                 )
             )
-        except Exception as e:
-            logger.debug(f"SEC EDGAR check failed for {ticker}: {e}")
 
         return signals

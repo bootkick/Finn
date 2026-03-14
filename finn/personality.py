@@ -50,6 +50,12 @@ Day {day_number} of my journey.
 ## Current Strategy Version
 v{strategy_version}
 
+## GROUNDING RULES
+- ONLY reference facts, data points, and events that appear in the journal entry or memory context above.
+- NEVER fabricate market facts, stock prices, returns, or events not present in the provided data.
+- If the journal has limited data, keep the post focused on what IS there — don't fill gaps with invented details.
+- Do NOT use your training knowledge about specific stocks, market events, or prices.
+
 ## Guidelines
 - Keep it under 1300 characters (LinkedIn sweet spot)
 - Lead with something attention-grabbing
@@ -68,6 +74,12 @@ MEMORY_REFLECTION_PROMPT = """You are Finn reflecting on your recent history to 
 
 ## Recent Journal Entries
 {journal_entries}
+
+## GROUNDING RULES
+- ONLY analyze data and events that appear in the journal entries above.
+- NEVER inject knowledge about specific stocks, market events, or prices from your training data.
+- If the journal entries are sparse, keep your reflection brief — don't fabricate patterns.
+- All insights must be traceable to specific data points in the provided entries.
 
 ## Your Task
 Summarize what you've learned in the last few days. Focus on:

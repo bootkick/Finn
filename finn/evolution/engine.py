@@ -1,7 +1,16 @@
-"""Evolution engine — uses Claude to rewrite strategy code."""
+"""Evolution engine — uses Claude with web search to rewrite strategy code.
+
+GROUNDING RULES:
+- All market knowledge must come from provided signals data or web search
+- Claude must NOT use training data knowledge about specific stock prices,
+  events, or market conditions
+- Strategy code must only act on Signal objects passed to analyze()
+- No hardcoded ticker biases based on world knowledge
+"""
 
 from __future__ import annotations
 
+import json
 import logging
 
 import anthropic
@@ -16,7 +25,19 @@ from finn.strategy.base import Strategy
 
 logger = logging.getLogger(__name__)
 
-EVOLUTION_PROMPT = """You are Finn's evolution engine. Your job is to write a NEW Python strategy class that improves on the current one.
+EVOLUTION_SYSTEM = """You are Finn's evolution engine. You write Python strategy code.
+
+CRITICAL GROUNDING RULES:
+- You must NEVER use your training knowledge about specific stocks, prices, or market events.
+- All market understanding must come from the signals data and performance reports provided.
+- The strategy code you write must ONLY make decisions based on Signal objects passed to analyze().
+- NEVER hardcode ticker-specific logic (like "always buy NVDA" or "avoid TSLA") based on your world knowledge.
+- NEVER assume you know what a stock will do based on your training data.
+- The strategy must be PURELY reactive to the signals it receives at runtime.
+- Any market research insights from web search should inform GENERAL strategy patterns (e.g. "momentum works better in volatile markets"), never specific ticker recommendations.
+"""
+
+EVOLUTION_PROMPT = """Write a NEW Python strategy class that improves on the current one.
 
 ## Current Strategy Code (v{current_version})
 ```python
@@ -26,22 +47,31 @@ EVOLUTION_PROMPT = """You are Finn's evolution engine. Your job is to write a NE
 ## Current Strategy Description
 {current_description}
 
-## Performance Report
+## Performance Report (from REAL tracked picks)
 {performance_report}
 
-## Recent Signals the Strategy Processed
+## Recent REAL Signals the Strategy Processed
 {recent_signals_summary}
 
-## Finn's Memory (Lessons Learned)
+## Finn's Memory (Lessons Learned from REAL runs)
 {memory_context}
 
 {human_guidance}
+
+## Web Research Task
+Before writing the strategy, search the web for:
+1. Current best practices for quantitative signal-based trading strategies
+2. What technical indicators or signal weighting approaches are working well recently
+3. Any relevant market regime information (high volatility? trending? mean-reverting?)
+
+Use these GENERAL insights to inform your strategy design — but NEVER hardcode specific
+stock recommendations or price targets from your research.
 
 ## Your Task
 Write a COMPLETE, improved Python strategy that:
 1. **Keeps what worked** — if win rate is good, preserve the core logic
 2. **Fixes what failed** — address the specific issues in the performance report
-3. **Tries something new** — introduce ONE meaningful change (new signal weighting, sector analysis, momentum detection, crypto correlation, etc.)
+3. **Tries something new** — introduce ONE meaningful change based on your web research
 4. **Uses memory** — incorporate lessons from Finn's accumulated experience
 5. **Implements the interface** — must subclass Strategy with analyze() and describe()
 
@@ -54,7 +84,8 @@ Write a COMPLETE, improved Python strategy that:
 - Must import from finn.models.signals: Signal, SignalType
 - Must import from finn.models.picks: Pick, Conviction
 - Signals may include both stocks AND crypto (look for asset_type in metadata)
-- describe() should explain your SPECIFIC changes and reasoning
+- describe() should explain your SPECIFIC changes, reasoning, AND what web research informed the change
+- NEVER hardcode ticker-specific biases — the strategy must work purely from signal data
 - Keep it practical — no theoretical perfection, just measurable improvement
 
 ## Important
@@ -63,7 +94,7 @@ Write a COMPLETE, improved Python strategy that:
 - Include a docstring at the top explaining what changed from the previous version
 """
 
-SOURCE_DISCOVERY_PROMPT = """You are Finn's source discovery engine. Based on recent performance and market context, suggest new data sources or signals that could improve Finn's strategy.
+SOURCE_DISCOVERY_PROMPT = """You are Finn's source discovery engine. Search the web for new FREE data sources that could improve a quantitative trading signal pipeline.
 
 ## Current Signal Sources
 {current_sources}
@@ -75,13 +106,13 @@ SOURCE_DISCOVERY_PROMPT = """You are Finn's source discovery engine. Based on re
 {memory_context}
 
 ## Your Task
-Suggest 1-3 new data sources or signal types Finn should explore. For each:
+Search the web for freely available financial data APIs, RSS feeds, or public datasets.
+Then suggest 1-3 new data sources Finn should explore. For each:
 1. What is the source? (specific URL, API, data type)
-2. Why would it help? (what gap does it fill?)
+2. Why would it help? (what gap does it fill based on the performance report?)
 3. How hard is it to implement? (easy/medium/hard)
 
-Be specific and actionable. Don't suggest sources that require paid enterprise APIs.
-Focus on freely available data: RSS feeds, free APIs, public datasets, etc.
+IMPORTANT: Only suggest sources you have VERIFIED exist via web search. Do not hallucinate APIs or URLs.
 
 Return a JSON array of suggestions:
 [{{"source": "...", "reason": "...", "difficulty": "...", "url_or_endpoint": "..."}}]
@@ -89,7 +120,7 @@ Return a JSON array of suggestions:
 
 
 class EvolutionEngine:
-    """Uses Claude API to evolve strategy code based on performance."""
+    """Uses Claude API with web search to evolve strategy code."""
 
     def __init__(
         self,
@@ -110,25 +141,12 @@ class EvolutionEngine:
         self.runner = runner
 
     def evolve(self, current_strategy: Strategy, current_code: str, memory_context: str = "", human_guidance: str = "") -> dict:
-        """Attempt to evolve the current strategy.
-
-        Returns dict with:
-            - evolved: bool (whether evolution succeeded)
-            - new_code: str | None
-            - new_version: int | None
-            - reason: str
-            - source_suggestions: list (new data sources to explore)
-        """
+        """Attempt to evolve the current strategy using web-grounded research."""
         current_version = self.db.get_active_strategy_version()
-
-        # Get performance feedback
         performance_report = self.scorer.generate_feedback(current_version)
-
-        # Get recent signals summary
         recent_signals = self._get_recent_signals_summary()
 
-        # Ask Claude to write improved strategy
-        logger.info(f"Asking Claude to evolve strategy v{current_version}...")
+        logger.info(f"Asking Claude (with web search) to evolve strategy v{current_version}...")
 
         prompt = EVOLUTION_PROMPT.format(
             current_version=current_version,
@@ -141,12 +159,24 @@ class EvolutionEngine:
         )
 
         try:
+            # Use web search tool so Claude can research latest strategy techniques
             response = self.client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=4096,
+                max_tokens=8096,
+                system=EVOLUTION_SYSTEM,
+                tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
                 messages=[{"role": "user", "content": prompt}],
             )
-            new_code = response.content[0].text.strip()
+
+            # Extract the text content (skip web search result blocks)
+            new_code = ""
+            for block in response.content:
+                if hasattr(block, "text"):
+                    new_code = block.text.strip()
+
+            if not new_code:
+                return {"evolved": False, "new_code": None, "new_version": None,
+                        "reason": "No code in response", "source_suggestions": []}
 
             # Strip markdown fences if Claude added them
             if new_code.startswith("```python"):
@@ -158,51 +188,38 @@ class EvolutionEngine:
 
         except Exception as e:
             logger.error(f"Claude API call failed: {e}")
-            return {"evolved": False, "new_code": None, "new_version": None, "reason": f"API error: {e}", "source_suggestions": []}
+            return {"evolved": False, "new_code": None, "new_version": None,
+                    "reason": f"API error: {e}", "source_suggestions": []}
 
         # Validate the new code
         logger.info("Validating new strategy code...")
         validation = self.validator.validate(new_code)
         if not validation["valid"]:
             logger.warning(f"New strategy failed validation: {validation['error']}")
-            return {
-                "evolved": False,
-                "new_code": new_code,
-                "new_version": None,
-                "reason": f"Validation failed: {validation['error']}",
-                "source_suggestions": [],
-            }
+            return {"evolved": False, "new_code": new_code, "new_version": None,
+                    "reason": f"Validation failed: {validation['error']}", "source_suggestions": []}
 
         # Load and test the new strategy
         try:
             new_strategy = self.runner.load_strategy(new_code)
         except Exception as e:
             logger.warning(f"Failed to load new strategy: {e}")
-            return {"evolved": False, "new_code": new_code, "new_version": None, "reason": f"Load failed: {e}", "source_suggestions": []}
+            return {"evolved": False, "new_code": new_code, "new_version": None,
+                    "reason": f"Load failed: {e}", "source_suggestions": []}
 
-        # Quick validation with sample signals
+        # Quick validation
         quick_test = self.backtester.validate_strategy(new_strategy)
         if not quick_test["valid"]:
             logger.warning(f"New strategy failed quick test: {quick_test.get('error')}")
-            return {
-                "evolved": False,
-                "new_code": new_code,
-                "new_version": None,
-                "reason": f"Quick test failed: {quick_test.get('error')}",
-                "source_suggestions": [],
-            }
+            return {"evolved": False, "new_code": new_code, "new_version": None,
+                    "reason": f"Quick test failed: {quick_test.get('error')}", "source_suggestions": []}
 
-        # Backtest against historical data
+        # Backtest against real historical data
         backtest = self.backtester.backtest(new_strategy)
         if not backtest["passed"]:
             logger.warning("New strategy failed backtesting")
-            return {
-                "evolved": False,
-                "new_code": new_code,
-                "new_version": None,
-                "reason": "Backtest failed — strategy produced no picks",
-                "source_suggestions": [],
-            }
+            return {"evolved": False, "new_code": new_code, "new_version": None,
+                    "reason": "Backtest failed — strategy produced no picks", "source_suggestions": []}
 
         # Deploy!
         new_version = current_version + 1
@@ -211,7 +228,7 @@ class EvolutionEngine:
         logger.info(f"Strategy evolved: v{current_version} → v{new_version}")
         logger.info(f"New strategy: {new_strategy.describe()[:200]}")
 
-        # Also discover new sources
+        # Discover new sources (also web-grounded)
         source_suggestions = self.discover_sources(performance_report, memory_context)
 
         return {
@@ -225,8 +242,13 @@ class EvolutionEngine:
         }
 
     def discover_sources(self, performance_report: str, memory_context: str) -> list[dict]:
-        """Ask Claude to suggest new data sources to explore."""
-        current_sources = "yfinance (stocks), RSS news feeds, Reddit (PRAW), SEC EDGAR, CoinGecko (crypto trending), yfinance crypto pairs"
+        """Ask Claude with web search to find real, verified data sources."""
+        current_sources = (
+            "Yahoo Finance HTTP API (stocks + crypto prices/volume/technicals), "
+            "Google News RSS (headlines), Yahoo Finance quote API (52-week range), "
+            "SEC EDGAR EFTS (filings search), CoinGecko (crypto trending), "
+            "Reddit via PRAW (social sentiment, requires API key)"
+        )
 
         prompt = SOURCE_DISCOVERY_PROMPT.format(
             current_sources=current_sources,
@@ -238,26 +260,30 @@ class EvolutionEngine:
             response = self.client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=1024,
+                tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}],
                 messages=[{"role": "user", "content": prompt}],
             )
-            text = response.content[0].text.strip()
 
-            # Extract JSON from response
-            import json
-            # Find JSON array in response
-            start = text.find("[")
-            end = text.rfind("]") + 1
-            if start >= 0 and end > start:
-                suggestions = json.loads(text[start:end])
-                logger.info(f"Source discovery found {len(suggestions)} suggestions")
-                return suggestions
+            # Extract text from response
+            text = ""
+            for block in response.content:
+                if hasattr(block, "text"):
+                    text = block.text.strip()
+
+            if text:
+                start = text.find("[")
+                end = text.rfind("]") + 1
+                if start >= 0 and end > start:
+                    suggestions = json.loads(text[start:end])
+                    logger.info(f"Source discovery found {len(suggestions)} suggestions")
+                    return suggestions
         except Exception as e:
             logger.debug(f"Source discovery failed: {e}")
 
         return []
 
     def _get_recent_signals_summary(self, days: int = 3) -> str:
-        """Summarize recent signals for the evolution prompt."""
+        """Summarize recent REAL signals for the evolution prompt."""
         from datetime import datetime, timedelta
 
         lines = []
@@ -268,7 +294,7 @@ class EvolutionEngine:
             signals = self.db.get_signals_for_date(date.isoformat())
             if signals:
                 lines.append(f"\n--- {date.isoformat()} ({len(signals)} signals) ---")
-                for s in signals[:10]:  # Cap at 10 per day
+                for s in signals[:10]:
                     lines.append(f"  [{s['source']}] {s['ticker']}: {s['headline'][:80]} (sentiment: {s['sentiment']:.2f})")
 
         return "\n".join(lines) if lines else "No recent signals available (this may be the first run)."

@@ -6,6 +6,7 @@ from finn.collectors.news import NewsCollector
 from finn.collectors.reddit import RedditCollector
 from finn.collectors.sec_filings import SECFilingCollector
 from finn.collectors.crypto import CryptoCollector
+from finn.collectors.web_news import WebNewsCollector
 
 __all__ = [
     "BaseCollector",
@@ -14,4 +15,5 @@ __all__ = [
     "RedditCollector",
     "SECFilingCollector",
     "CryptoCollector",
+    "WebNewsCollector",
 ]

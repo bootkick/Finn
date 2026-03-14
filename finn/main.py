@@ -11,7 +11,7 @@ from rich.logging import RichHandler
 
 from finn.config import Settings
 from finn.database import Database
-from finn.collectors import MarketDataCollector, NewsCollector, RedditCollector, SECFilingCollector, CryptoCollector
+from finn.collectors import MarketDataCollector, NewsCollector, WebNewsCollector, RedditCollector, SECFilingCollector, CryptoCollector
 from finn.strategy.runner import StrategyRunner
 from finn.evaluation.tracker import PerformanceTracker
 from finn.evaluation.scorer import StrategyScorer
@@ -325,6 +325,7 @@ def _collect_signals(settings: Settings) -> list[Signal]:
     """Collect signals from all available sources."""
     collectors = [
         MarketDataCollector(),
+        WebNewsCollector(),
         NewsCollector(),
         RedditCollector(
             client_id=settings.reddit_client_id,
