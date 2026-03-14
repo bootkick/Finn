@@ -5,9 +5,7 @@ __pycache__/
 dist/
 build/
 .env
-data/db/
-data/journal/
-data/strategies/
+data/
 *.sqlite
 *.db
 .venv/
